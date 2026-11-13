@@ -1,0 +1,92 @@
+observable: 'XC'
+
+
+likelihood: 'binned'
+spaceborne_covariance: False
+cov_input_file: ''
+config_spaceborne: ''
+which_cov: ''
+
+specs:
+  scale_cuts:
+    type: 'lmax'
+    # max_WL: [2048, 2048, 2048, 2048, 
+    #                2048, 2048, 2048, 
+    #                      2048, 2048, 
+    #                            2048,]  
+            
+    # max_GC: [105, 105, 105, 105,    ## Tab E1 in 2406.12675
+    #               154, 154, 154, 
+    #                    199, 199, 
+    #                         237,]  
+
+    # max_GGL: 
+    #           [139, 139, 139, 139,    ## Extended
+    #           139, 204, 204, 204,    ## Tab E1 in 2406.12675
+    #           139, 204, 264, 264,    ## it's symmetric, but couldn't make the code run wih only triangular matrix
+    #           139, 204, 264, 315,]  
+    #           # [70, 70, 70, 70,       ## Conservative
+    #           # 70, 103, 103, 103, 
+    #           # 70, 103, 133, 133, 
+    #           # 70, 103, 133, 158]
+
+    max_WL: [3144, 3144, 3144, 3144, 
+                   3144, 3144, 3144, 
+                         3144, 3144, 
+                               3144,]  
+    max_GC: [3144, 3144, 3144, 3144, 
+                   3144, 3144, 3144, 
+                         3144, 3144, 
+                               3144,]  
+    max_GGL: [3144, 3144, 3144, 3144,
+              3144, 3144, 3144, 3144,
+              3144, 3144, 3144, 3144,
+              3144, 3144, 3144, 3144,]  
+
+
+    cosmo: # for transformation from k_eff to ell
+      'Omega_m': 0.31
+      'w0': -1.
+      'wa': 0.
+
+  survey_info: 'DESY3' 
+  custom_survey_path: 
+
+
+data:
+  add_noise: False
+  type: 0
+  data_file: 
+
+  nl_model: 0 ## or 1 for Bacco
+  bacco_option: 'z_extrap_linear'
+  bias_model: 0
+  heft_extrap_k_const: True
+  ia_model: 0
+  baryon_model: 0
+  cross_sqrt_baryon: True
+  photoz_err_model: 0
+  params: ./ini_files/ini_data/params_data_hmcode.yaml
+
+theory:
+  add_noise: False
+  nl_model: 0 ## or 1 for Bacco
+  bias_model: 0
+  heft_extrap_k_const: True
+  ia_model: 0
+  baryon_model: 0
+  cross_sqrt_baryon: True
+  photoz_err_model: 0
+  params: ./ini_files/param_files/params_model_hmcode.yaml  
+
+output: 
+  chain_name: desy3_GGL_HMCode_theta3p5_free_Tagn_noIA_baccoPrior-08Oct
+sampler: 
+  mcmc:
+    verbose: True
+    n_eff: 5000
+    n_live: 1000
+    pool: 20
+    resume: False
+    hdf5_name:  desy3_GGL_HMCode_theta3p5_free_Tagn_noIA_baccoPrior-08Oct
+    
