@@ -9,7 +9,7 @@ import numpy as np
 import yaml
 import time
 from .theory import Theory
-from .specs import LSSTSetUp, EuclidSetUp, CLOESetUp
+from .specs import LSSTSetUp, EuclidSetUp, DESY3SetUp
 from .likelihood import MGLike
 from datetime import timedelta
 import MGrowth as mg
@@ -103,17 +103,19 @@ class DataClass():
         else:
             raise NotImplementedError('Reading data from file is not implemented yet')   
 
-
+    
     def compute_data(self, Survey):
         if Survey.likelihood == 'determinants':
             compute_matrix = {
             'WL': self.DataModel.compute_data_matrix_wl,
             'GC': self.DataModel.compute_data_matrix_gc,
+            'XC': self.DataModel.compute_data_matrix_xc,
             '3x2pt': self.DataModel.compute_data_matrix_3x2pt
             }
             assign_ell = {
             'WL': Survey.ells_wl,
             'GC': Survey.ells_gc,
+            'XC': Survey.ells_xc,
             '3x2pt': Survey.ells_wl
             }
             self.ells = assign_ell[Survey.observable]
@@ -128,14 +130,23 @@ class DataClass():
             compute_vector = {
             'WL': self.DataModel.compute_data_vector_wl,
             'GC': self.DataModel.compute_data_vector_gc,
+            'XC': self.DataModel.compute_data_vector_xc,
             '3x2pt': self.DataModel.compute_data_vector_3x2pt
             }
             # gaussian covariance with diagonal components only
-            compute_covariance = {
-            'WL': self.DataModel.compute_covariance_wl,
-            'GC': self.DataModel.compute_covariance_gc,
-            '3x2pt':  self.DataModel.compute_covariance_cosmosis_3x2pt 
-            }
+            if Survey.spaceborne_covariance == True:
+                compute_covariance = {
+                'WL': self.DataModel.mask_input_spaceborne_covariance_wl,  
+                'GC': self.DataModel.mask_input_spaceborne_covariance_gc,  
+                '3x2pt': self.DataModel.mask_input_spaceborne_covariance_3x2pt 
+                }
+            else:
+                compute_covariance = {
+                'WL': self.DataModel.compute_covariance_wl,
+                'GC': self.DataModel.compute_covariance_gc,
+                'XC': self.DataModel.compute_covariance_xc,
+                '3x2pt':  self.DataModel.compute_covariance_cosmosis_3x2pt 
+                }
             print('computing data vector')
             self.data_vector = compute_vector[Survey.observable](self.params_data_dic)
             print('wl_masked_ells: ', sum(Survey.mask_data_vector_wl))
@@ -169,6 +180,7 @@ class DataClass():
             except:                
                 print('failed to do cholesky decomposition')
                 print('######INVERSE COVARIANCE!!!!########') 
+
 
             
          
@@ -260,8 +272,8 @@ class MGL():
         
         # check the probe
         self.probe = self.config_dic['observable']
-        if self.probe not in ['3x2pt', 'WL', 'GC']:
-            raise ValueError(f"Invalid probe type: {self.probe}. Must be '3x2pt', 'WL', or 'GC'.")
+        if self.probe not in ['3x2pt', 'WL', 'GC', 'XC']:
+            raise ValueError(f"Invalid probe type: {self.probe}. Must be '3x2pt', 'WL', 'GC' or 'XC.")
  
         self.path = self.config_dic.get('path', './')
         print('path: ', self.path)

@@ -1,5 +1,7 @@
 import numpy as np
 from scipy.linalg import cholesky, solve_triangular
+
+
 class MGLike:
     def __init__(self, Model, Data, use_jax=False):
         self.Theo = Model
@@ -25,16 +27,22 @@ class MGLike:
                 self.compute = self.loglikelihood_det_wl
             elif Model.Survey.observable == 'GC':
                 self.compute_data_matrix = self.Theo.compute_data_matrix_gc
-                self.compute = self.loglikelihood_det_gc    
+                self.compute = self.loglikelihood_det_gc 
+            elif Model.Survey.observable == 'XC':
+                self.compute_data_matrix = self.Theo.compute_data_matrix_xc
+                self.compute = self.loglikelihood_det_xc    
     
         else:
             if Model.Survey.observable == 'WL':
                 self.compute_data_vector = self.Theo.compute_data_vector_wl
             elif Model.Survey.observable == 'GC':
-                self.compute_data_vector = self.Theo.compute_data_vector_gc   
+                self.compute_data_vector = self.Theo.compute_data_vector_gc  
+            elif Model.Survey.observable == 'XC':
+                self.compute_data_vector = self.Theo.compute_data_vector_xc   
             elif Model.Survey.observable == '3x2pt':
                 self.compute_data_vector = self.Theo.compute_data_vector_3x2pt    
             self.compute = self.loglikelihood_binned_wrapper      
+
 
     def loglikelihood_det_3x2pt(self, param_dic):
         r"""Compute the log-likelihood for a 3x2pt analysis using the determinant method from https://arxiv.org/pdf/1210.2194.
@@ -83,7 +91,6 @@ class MGLike:
             det_obs = np.concatenate([det_obs,det_obs_high])
             det_mix = np.concatenate([det_mix,det_mix_high])
             chi2 += np.sum((2*self.Data.ells+1)*self.Theo.Survey.fsky*((det_mix/det_theo)+np.log(det_theo/det_obs)))
-            print('chi2: ', chi2)
             return -0.5*chi2 
         else:
             return -np.inf
@@ -147,7 +154,39 @@ class MGLike:
             chi2 += np.sum((2*self.Data.ells+1)*self.Theo.Survey.fsky*((det_mix/det_theo)+np.log(det_theo/det_obs)))
             return -0.5*chi2    
         else:
+            return -np.inf            
+
+        
+    def loglikelihood_det_xc(self, param_dic):
+        """Compute the log-likelihood for a given set of parameters using the determinant method.
+        Consider GGL.
+
+        Parameters:
+        -----------
+        param_dic : dict
+            Dictionary containing the parameters for the model.
+
+        Returns:
+        --------
+        float
+            The log-likelihood value. If the parameters are invalid, returns negative infinity.
+        """
+        param_dic_all, status = self.Theo.check_pars(param_dic)
+        if status:  
+            chi2 - 0.
+            cov_theo = self.compute_data_matrix(param_dic_all)
+            det_theo = np.linalg.det(cov_theo)
+            det_mix = np.zeros_like(det_theo)
+            for i in range(self.Theo.Survey.nbin_l):
+                new_cov = np.copy(cov_theo)
+                det_obs = self.Data.det_obs
+                new_cov[:, i] = self.Data.cov_obs[:, :, i]
+                det_mix += np.linalg.det(new_cov)
+            chi2 += np.sum((2*self.Data.ells+1)*self.Theo.Survey.fsky*((det_mix/det_theo)+np.log(det_theo/det_obs)))
+            return -0.5*chi2    
+        else:
             return -np.inf      
+
         
     def loglikelihood_binned_wrapper(self, param_dic):
         """Binned log-likelihood: use JAX path if enabled and available, else Python."""
@@ -165,6 +204,7 @@ class MGLike:
             mask = self.Theo.Survey.mask_data_vector_3x2pt
             return self._log_like_jax(theory_arrays, self.Data.data_vector, cov_info, mask)
         return self.loglikelihood(param_dic)
+
  
     def loglikelihood(self, param_dic):
         """Calculate the log-likelihood for a given set of parameters using the difference between model's and data's vectors.
@@ -202,6 +242,14 @@ class MGLike:
 
             if not np.isfinite(chi2):
                 return -np.inf
+            # AI fix:
+            # A valid covariance is positive definite, so its quadratic form
+            # cannot produce a materially negative chi-square. In particular,
+            # do not turn an invalid/indefinite inverse covariance into a
+            # positive log-likelihood through the fallback path above.
+            if chi2 < -1e-10:
+                return -np.inf
+            chi2 = max(float(chi2), 0.0)
             return -0.5*chi2    
         else:
             return -np.inf      

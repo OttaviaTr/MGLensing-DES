@@ -179,7 +179,7 @@ theory:
   params: ./ini_files/param_files/params_model_bacco.yaml  
 
 output: 
-  chain_name: desy3_GGL_Bacco
+  chain_name: desy3_test
 sampler: 
   mcmc:
     verbose: True
@@ -187,5 +187,5 @@ sampler:
     n_live: 1000
     pool: 20
     resume: False
-    hdf5_name:  desy3_GGL_Bacco
+    hdf5_name:  desy3_test
     

@@ -19,7 +19,7 @@ os.chdir(folder)
 
 
 
-MGLtest = MGLensing.MGL("ini_files/config_files/config_hmcode.yaml")
+MGLtest = MGLensing.MGL("ini_files/config_files/config_desy3_bacco_cuillin.yaml")
 #MGLtest = MGLensing.MGL("ini_files/pca/config_muSigma.yaml")
 # MGLtest = MGLensing.MGL("ini_files/config_files/config_qg.yaml")
 
