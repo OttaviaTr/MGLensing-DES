@@ -1,6 +1,6 @@
 import numpy as np
 import MGrowth as mg
-from scipy.integrate import simpson, trapezoid, cumulative_trapezoid
+from scipy.integrate import trapezoid, cumulative_trapezoid
 from scipy import interpolate as itp
 from .structure.hmcode2020_interface import HMcode2020
 from .structure.bacco_interface import BaccoEmu
@@ -891,7 +891,7 @@ class Theory:
         #W_L = self.w_gamma + self.factor_nla[:, :, None] *self.w_ia # ell, zz_integr, bin_i
         #cl_ll_int = W_L[:,:,:,None] * W_L[:,:,None,:] * self.pmm[:, :, None, None] / self.ez[None,:,None,None] / self.rz[None,:,None,None] / self.rz[None,:,None,None] / H0_h_c
         # integrate along the z_integr-direction
-        cl_ll = simpson(cl_ll_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_wl, :, :] #trapezoid(cl_ll_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_wl, :, :]
+        cl_ll = trapezoid(cl_ll_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_wl, :, :] #trapezoid(cl_ll_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_wl, :, :]
         # add noise to the auto-correlated bins
         for i in range(self.Survey.nbin_s):
             cl_ll[:, i, i] += self.Survey.noise['LL']
@@ -1129,7 +1129,7 @@ class Theory:
         # compute integrand with the dimensions of (ell, z_integr, bin_i, bin_j)
         cl_gg_int = self.w_g[:,:,:,None] *self. w_g[:,: , None, :] * self.pgg / self.ez[None,:,None,None] / self.rz[None,:,None,None] / self.rz[None,:,None,None] / H0_h_c    
         # integrate along the z_integr direction
-        cl_gg = trapezoid(cl_gg_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_gc, :, :] #simpson(cl_gg_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_gc, :, :] 
+        cl_gg = trapezoid(cl_gg_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_gc, :, :] 
         # add noise
         for i in range(self.Survey.nbin_l):
             cl_gg[:, i, i] += self.Survey.noise['GG']
@@ -1210,19 +1210,14 @@ class Theory:
         cl_gl : numpy.ndarray
             The galaxy-lensing angular power spectrum with dimensions (ell, bin_i, bin_j).
         """
-        # new implementation
         # compute components of the integrand
         kernel_ia_gal = self.w_ia[:, :, :, None] * self.pk_gal_ia
         kernel_wl_gal = self.w_gamma[:, :, :, None] * self.pgm[:,:,None,:]
         # compute integrand with dimensions (ell, z_integr, bin_i, bin_j)
         cl_lg_int = (kernel_wl_gal + kernel_ia_gal) * self.w_g[:, :, None, :] / self.ez[None,:,None,None] / self.rz[None,:,None,None] / self.rz[None,:,None,None] / H0_h_c
-        # old implementation
-        #W_L = self.w_gamma + self.factor_nla[:, :, None] *self.w_ia # ell, zz_integr, bin_i
-        #W_G = self.w_g[:, :, None, :]
-        #cl_lg_int = W_L[:, :, :, None] * W_G * self.pgm[:,:,None,:] / self.ez[None,:,None,None] / self.rz[None,:,None,None] / self.rz[None,:,None,None] / H0_h_c
 
         # integrate along the z-integr direction
-        cl_lg = trapezoid(cl_lg_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_xc,:,:]  # simpson(cl_lg_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_xc,:,:] 
+        cl_lg = trapezoid(cl_lg_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_xc,:,:] 
         # transpose LG to get GL
         cl_gl = np.transpose(cl_lg, (0, 2, 1))  
         return cl_lg, cl_gl

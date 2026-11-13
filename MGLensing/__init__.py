@@ -251,8 +251,8 @@ class MGL():
             self.Survey = LSSTSetUp(self.config_dic)
         elif 'Euclid' in self.config_dic['specs']['survey_info']:
             self.Survey = EuclidSetUp(self.config_dic)    
-        elif self.config_dic['specs']['survey_info'] == 'CLOE':
-            self.Survey = CLOESetUp(self.config_dic)
+        elif self.config_dic['specs']['survey_info'] == 'DESY3':
+            self.Survey = DESY3SetUp(self.config_dic)
         else:
             raise ValueError('Invalid survey name')
         if self.Survey.zz_integr[0]==0.:

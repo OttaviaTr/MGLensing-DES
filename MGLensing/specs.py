@@ -3,12 +3,12 @@ from scipy.special import erf
 from scipy.integrate import trapezoid,quad
 from scipy.interpolate import interp1d
 from math import sqrt, log10, exp, pow
-import sacc
-import yaml
-import warnings
+import h5py
 import os
+
 try: import euclidlib as el
 except: print('euclidlib not installed! Euclid TR1 setup will not be available!')
+
 DEG2_IN_SPHERE = 4 * np.pi * (180 / np.pi)**2
 
 dirname = os.path.split(__file__)[0]
@@ -963,3 +963,121 @@ class CLOESetUp:
         self.lum_func = get_luminosity_func(dirname+'/scaledmeanlum_E2Sa.dat')
         self.likelihood = likelihood
         
+
+
+
+class DESY3SetUp:
+    def __init__(self, config:dict):
+        survey_info = config['specs']['survey_info']
+        scale_cuts_info = config['specs']['scale_cuts']
+        likelihood = config['likelihood']
+        self.survey_name = 'DESY3'
+        self.observable = config['observable']
+        self.spaceborne_covariance = config['spaceborne_covariance']
+        if self.spaceborne_covariance:
+            # input SB-like covariance
+            self.cov_input_file = config['cov_input_file']
+            self.which_cov = config['which_cov']
+
+        # redshift setup 
+        self.zmin = 0.2
+        self.zmax = 1.3
+        self.zbin_integr = z_bins_for_integration 
+        self.zz_integr = np.linspace(self.zmin, self.zmax, num=self.zbin_integr, endpoint=True)
+        
+        self.fsky = 0.1  # 4143 deg^2
+        self.gal_per_sqarcmn_s = np.array([1.476, 1.479, 1.484, 1.461])  # https://www.darkenergysurvey.org/wp-content/uploads/2021/05/desy3_maglim2x2pt.pdf 
+        self.gal_per_sqarcmn_l = np.array([0.15, 0.107, 0.109, 0.146])  # gal/arcmin2
+        self.rms_shear = 0.26
+        self.nbin_l = 4
+        self.nbin_s = 4
+
+        nz_file = '/home/otruttero/ridges/MGLensing-ridges/ini_files/projected_probes_maps_v11dmb.h5'
+        # nz_file = '/home/s2561233/Documents/lss/ridges/ridges-mystuff/data/projected_probes_maps_v11dmb.h5'
+        self.z_bin_edges_s = np.array([0.2, 0.43, 0.63, 0.9, 1.3])  # metacal (4 bins, sources)
+        self.z_bin_edges_l = np.array([0.20, 0.40, 0.55, 0.70, 0.85])  # maglim (4 bins, 6 discarding last two, lens)
+        # taking average from bin edges above
+        self.z_bin_center_s = np.array([0.315, 0.53, 0.765, 1.1])
+        self.z_bin_center_l = np.array([0.3, 0.475, 0.625, 0.775])
+
+        # bin pairs to be considered
+        self.select_bin_pairs = [ [0,1], [0,2], [0,3], [1,1], [1,2], [1,3], [2,2], [2,3], [3,3] ]
+
+        # normalized galaxy distribution and noise
+        self.eta_z_s, self.eta_z_l = self.get_norm_galaxy_distrib(nz_file) 
+        # WARNINRG: taking a maximum value of n(z) and not W(z): fine for galazy clustering but very wrong for weak lensing
+        zz_mod_wl = [self.zz_integr[np.argmax(self.eta_z_s[:, i])] for i in range (self.nbin_s)]
+        zz_mod_gg = [self.zz_integr[np.argmax(self.eta_z_l[:, i])] for i in range (self.nbin_l)]
+
+        n_bar_l = get_noise(self.nbin_l, self.gal_per_sqarcmn_l)
+        n_bar_s = get_noise(self.nbin_s, self.gal_per_sqarcmn_s)
+        self.noise = {
+            'LL': self.rms_shear**2./n_bar_s,
+            'LG': 0.,
+            'GL': 0.,
+            'GG': 1./n_bar_l
+            }
+        
+        self.aa_integr = np.array(1./(1.+self.zz_integr[::-1])) 
+        self.zbin_integr = len(self.zz_integr)        
+
+        # \ell bins setup  (https://arxiv.org/pdf/2203.07128)
+        lmin = 8
+        self.lmin = lmin
+        self.lbin = 32
+        lmax = 4000 # 2048  chenged to 4000 only to allow ell_max corresponding to theta~3.5 (ell=3144)'
+        self.lmax = lmax
+
+        if likelihood == 'determinants':
+            if self.nbin_s != self.nbin_l and self.observable=='3x2pt':
+                raise ValueError('Likelihood with determinants is valid only for the same number of z-bins in lenses and sources!')
+            self.ell = np.logspace(log10(lmin), log10(lmax), num=self.lbin, endpoint=True) 
+
+        elif likelihood == 'binned':
+            self.ell_bin_edges = np.logspace(log10(lmin), log10(lmax), num=self.lbin+1, endpoint=True) 
+            self.d_ell_bin = np.diff(self.ell_bin_edges)
+            # means in log-space:
+            self.l_wl_bin_centers = np.sqrt(self.ell_bin_edges[:-1] *self.ell_bin_edges[1:])
+            self.ell = self.l_wl_bin_centers
+        
+        validate_and_setup_lmax(self, scale_cuts_info, likelihood, lmin, lmax, zz_mod_wl, zz_mod_gg)
+        self.lum_func = get_luminosity_func(dirname+'/scaledmeanlum_E2Sa.dat')
+        self.likelihood = likelihood
+
+
+    def get_norm_galaxy_distrib(self, nz_file_h5py):
+        nz_maglim = []
+        nz_metacal = []
+        z_maglim = []
+        z_metacal = []
+
+        f = h5py.File(nz_file_h5py)
+        for i in range(self.nbin_l):
+            z_maglim.append(f['nz']['maglim'+str(i+1)][:,0])
+            nz_maglim_i = f['nz']['maglim'+str(i+1)][:,1]
+            nz_maglim.append(np.interp(self.zz_integr, z_maglim[-1], nz_maglim_i))
+        for i in range(self.nbin_s):
+            z_metacal.append(f['nz']['metacal'+str(i+1)][:,0])
+            nz_metacal_i = f['nz']['metacal'+str(i+1)][:,1]
+            nz_metacal.append(np.interp(self.zz_integr, z_metacal[-1], nz_metacal_i))
+        
+        norm_nz_l = np.array(nz_maglim).T
+        norm_nz_s = np.array(nz_metacal).T
+        z_maglim = np.array(z_maglim).T
+        z_metacal = np.array(z_metacal).T        
+        
+        # check if normalized galaxy distribution integrates to 1
+        for Bin in range(self.nbin_l):
+            check_nz_l_i= trapezoid(norm_nz_l[:,Bin],self.zz_integr[:]) 
+            print('Lens galaxy distribution for bin ', Bin, ' integrates to ', check_nz_l_i)
+            norm_nz_l[:,Bin] = norm_nz_l[:,Bin] / check_nz_l_i
+        for Bin in range(self.nbin_s):
+            check_nz_s_i = trapezoid(norm_nz_s[:,Bin],self.zz_integr[:]) 
+            print('Source galaxy distribution for bin ', Bin, ' integrates to ', check_nz_s_i)
+            norm_nz_s[:,Bin] = norm_nz_s[:,Bin] / check_nz_s_i
+
+        print('h5 n(z) shape: ', norm_nz_s.shape, norm_nz_l.shape)
+        print('h5 z shape: ', z_maglim.shape, z_metacal.shape)
+        print('zz_integr shape: ', self.zz_integr.shape)
+
+        return norm_nz_s, norm_nz_l  
