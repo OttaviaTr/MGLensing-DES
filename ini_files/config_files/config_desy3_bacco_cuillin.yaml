@@ -17,6 +17,9 @@ which_cov: ''
 # reads covariance matrix from input file specified in cov_input_file
 # and covariance type specified by which_cov (options: Gauss, TOT)
 
+use_real_data: True
+fits_file: '/home/s2561233/Documents/lss/cosmosis-standard-library/likelihood/des-y3/2pt_NG_final_2ptunblind_02_24_21_wnz_covupdate.v2.fits'
+
 
 specs:
   #Scale cuts
@@ -69,7 +72,7 @@ specs:
   #     LSST: LSST_Y1 or LSST_Y10 
   #----- not implemented yet:  
   #     Custom: analytical n(z) or from file
-  survey_info: 'DESY3' #'Euclid_Y1' #'Euclid_5bins'
+  survey_info: 'DESY3'
   custom_survey_path: 
 
 

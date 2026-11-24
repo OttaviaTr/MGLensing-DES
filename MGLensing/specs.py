@@ -1,4 +1,5 @@
 import numpy as np
+import twopoint
 from scipy.special import erf
 from scipy.integrate import trapezoid,quad
 from scipy.interpolate import interp1d
@@ -952,6 +953,12 @@ class DESY3SetUp:
         lmax = 4000 # 2048  chenged to 4000 only to allow ell_max corresponding to theta~3.5 (ell=3144)'
         self.lmax = lmax
 
+        self.use_real_data = config['use_real_data']
+        # directly by reading the fine -> find a way to make it adaptive
+        self.n_theta = 20
+        if self.use_real_data:
+            self.read_gammat_theta_from_fits(config["fits_file"])
+
         if likelihood == 'determinants':
             if self.nbin_s != self.nbin_l and self.observable=='3x2pt':
                 raise ValueError('Likelihood with determinants is valid only for the same number of z-bins in lenses and sources!')
@@ -1005,3 +1012,23 @@ class DESY3SetUp:
         print('zz_integr shape: ', self.zz_integr.shape)
 
         return norm_nz_s, norm_nz_l  
+
+
+    def read_gammat_theta_from_fits(self, fits_file):
+        data = twopoint.TwoPointFile.from_fits(fits_file)
+        gammat = data.get_spectrum("gammat")
+
+        self.theta = np.zeros((self.n_theta, self.nbin_l, self.nbin_s))
+        self.gt_values = np.zeros((self.n_theta, self.nbin_l, self.nbin_s))
+        
+        for i in range(self.nbin_l):
+            for j in range(self.nbin_s):
+                # bin idx+1 because bins=[1,4] in DES fits file
+                theta_pair, gt_pair = gammat.get_pair(i+1, j+1)
+                
+                if len(theta_pair) != self.n_theta or len(gt_pair) != self.n_theta:
+                    raise ValueError(f"Worng len of theta, it should be {self.n_theta} \
+                                     for ({i + 1}, {j + 1}); got {len(theta_pair)}")
+                
+                self.theta[:, i, j] = theta_pair  # iarcmin
+                self.gt_values[:, i, j] = gt_pair

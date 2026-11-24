@@ -1,6 +1,7 @@
+from scipy.special import jv
 import numpy as np
 import MGrowth as mg
-from scipy.integrate import trapezoid, cumulative_trapezoid
+from scipy.integrate import simpson, trapezoid, quad
 from scipy import interpolate as itp
 from .structure.hmcode2020_interface import HMcode2020
 from .structure.bacco_interface import BaccoEmu
@@ -29,10 +30,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 H0_h_c = 1./2997.92458 
 # =100/c in Mpc/h Hubble constant conversion factor
-C_IA = 0.0134
-# Trapezoid panels per redshift interval for the comoving distance.
-# 64 keeps |Δχ|/χ below about 1e-8 for w0 in [-3, -0.3] and wa in [-3, 3].
-_DISTANCE_PANELS = 64 
+C_IA = 0.0134 
 
 # =dimensionsless, C x rho_crit 
 PIVOT_REDSHIFT = 0.
@@ -120,39 +118,12 @@ def build_data_matrix_3x2pt(cl_ll, cl_gg, cl_lg, cl_gl,  binned_ell_wl, binned_e
                 all_int_ell_gc[:], spline_lg[bin1, bin2]) 
     for bin1 in range(nbin_l):
         for bin2 in range(nbin_s):        
-            cov_theory[:, nbin_l + bin1, bin2] = itp.splev(
+            cov_theory[:, nbin_s + bin1, bin2] = itp.splev(
                 all_int_ell_gc[:], spline_gl[bin1, bin2])
                  
     return cov_theory, cov_theory_high
 
 #flag_test_heft_new_extrap = True
-def _expansion_function(z, omega_m, w0, wa):
-    """E(z) for a flat w0-wa background."""
-    zp1 = 1. + z
-    omega_l = (1. - omega_m) * zp1**(3. * (1. + w0 + wa)) * np.exp(-3. * wa * z / zp1)
-    return np.sqrt(omega_m * zp1**3 + omega_l)
-
-
-def _comoving_distance_c_over_h0(zz, omega_m, w0, wa, n_panels=_DISTANCE_PANELS):
-    """∫_0^z dz'/E(z') on an arbitrary increasing redshift grid, in units of c/H0.
-
-    Each interval, including the one from 0 to zz[0], is a trapezoid. The panel
-    width is at most that of a 400-point grid from 0 to 3 with n_panels steps,
-    so a coarser output grid does not loosen the integral.
-    """
-    zz = np.asarray(zz, dtype=np.float64)
-    z_edges = np.concatenate(([0.], zz))
-    dz = np.diff(z_edges)
-    dz_cap = 3.0 / 399.0
-    n_use = max(n_panels, int(np.ceil(np.max(dz) / dz_cap * n_panels)))
-    t = np.linspace(0., 1., n_use + 1)
-    z_panel = z_edges[:-1, None] + dz[:, None] * t
-    inv_e = 1. / _expansion_function(z_panel, omega_m, w0, wa)
-    weights = np.ones(n_use + 1)
-    weights[0] = weights[-1] = 0.5
-    return np.cumsum(dz * (inv_e * weights).sum(axis=1) / n_use)
-
-
 class Theory:
     def __init__(self, SurveyClass, model: dict):
         """
@@ -589,9 +560,15 @@ class Theory:
             r_z_grid = np.array([self.StructureEmu.rcom_interp(zz_i) for zz_i in zz]) / H0_h_c
             k_grid =(self.Survey.ell[:,None]+0.5)/r_z_grid
         else:
-            e_z_grid = _expansion_function(zz, omega_m, w0, wa)
-            # χ(z) = ∫_0^z dz'/E(z'), in units of c/H0, then converted to Mpc/h.
-            r_z_grid = _comoving_distance_c_over_h0(zz, omega_m, w0, wa) / H0_h_c
+            omega_lambda_func = lambda z: (1.-omega_m) * pow(1.+z, 3.*(1.+w0+wa)) * np.exp(-3.*wa*z/(1.+z))
+            e_z_func = lambda z: np.sqrt(omega_m*pow(1.+z, 3) + omega_lambda_func(z))
+            r_z_int = lambda z: 1./e_z_func(z)
+            r_z_grid = np.zeros(len(zz), dtype=np.float64)
+            r_z_grid[0] = quad(r_z_int, 0, zz[0])[0]
+            for i in range(1, len(zz)):
+                r_z_grid[i] = r_z_grid[i-1] + quad(r_z_int, zz[i-1], zz[i])[0]
+            r_z_grid = r_z_grid / H0_h_c
+            e_z_grid = np.array([e_z_func(zz_i) for zz_i in zz])
             k_grid =(self.Survey.ell[:,None]+0.5)/r_z_grid
         return e_z_grid, r_z_grid, k_grid
     
@@ -781,6 +758,7 @@ class Theory:
         pk_delta_ia = self.factor_nla * self.pmm
         pk_iaia = (self.factor_nla)**2 * self.pmm
         return pk_delta_ia, pk_iaia
+
     
     def get_wl_kernel(self, params_dic):
         r"""Calculate the weak lensing kernel:
@@ -813,17 +791,13 @@ class Theory:
         """
         omega_m = params_dic['Omega_m']
         eta_z_s =  self.get_n_of_z(self.Survey.eta_z_s, self.deltaz_s, self.Survey.nbin_s)
-        zz = self.Survey.zz_integr
-        # Wbar_i(z) = ∫_{z'>z} n_i(z') [1 - r(z)/r(z')] dz'
-        # = ∫_{z'>z} n_i dz' - r(z) ∫_{z'>z} n_i/r dz',
-        # with the same trapezoid weights as integrating the upper triangle in z'.
-        n_over_r = eta_z_s / self.rz[:, None]
-        cum_n = cumulative_trapezoid(eta_z_s, zz, axis=0, initial=0.)
-        cum_nr = cumulative_trapezoid(n_over_r, zz, axis=0, initial=0.)
-        window = (cum_n[-1] - cum_n) - self.rz[:, None] * (cum_nr[-1] - cum_nr)
-        prefactor = 1.5 * H0_h_c**2 * omega_m * self.rz * (1. + zz)
-        # extra leading axis: the kernel can be ell-dependent once Sigma(k, z) is applied
-        w_gamma = (prefactor[:, None] * window)[None, :, :]
+        
+        # in the integrand dimensions are (bin_i, zz_integr, zz_integr)
+        integrand = 3./2.*H0_h_c**2. * omega_m * self.rz[None,:,None]*(1.+self.Survey.zz_integr[None,:,None])*eta_z_s.T[:,None,:]*(1.-self.rz[None,:,None]/self.rz[None,None,:])
+        # integrate along the third dimension in zz_integr
+        w_gamma  = trapezoid(np.triu(integrand), self.Survey.zz_integr,axis=-1).T  # simpson(np.triu(integrand), self.Survey.zz_integr,axis=-1).T 
+        # add an extra dimension to w_gamma as we might have ell-dependence in the IA-kernel due to the scale-dependent linear growth
+        w_gamma = w_gamma[None,:,:]
         # add modification of the lensing potential
         # must have the same dimension (ell, zz_integr, n_bin) or be 1
         # specified in StructureEmu, can be scale-dependent
@@ -887,18 +861,18 @@ class Theory:
         # compute the integrand with dimensions (ell, z_integr, bin_i, bin_j)
         cl_ll_int = (kernel_wl + kernel_delta_ia + kernel_iaia) / self.ez[None,:,None,None] / self.rz[None,:,None,None] / self.rz[None,:,None,None] / H0_h_c
 
-        # old implementation
-        #W_L = self.w_gamma + self.factor_nla[:, :, None] *self.w_ia # ell, zz_integr, bin_i
-        #cl_ll_int = W_L[:,:,:,None] * W_L[:,:,None,:] * self.pmm[:, :, None, None] / self.ez[None,:,None,None] / self.rz[None,:,None,None] / self.rz[None,:,None,None] / H0_h_c
         # integrate along the z_integr-direction
-        cl_ll = trapezoid(cl_ll_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_wl, :, :] #trapezoid(cl_ll_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_wl, :, :]
+        cl_ll = trapezoid(cl_ll_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_wl, :, :]
         # add noise to the auto-correlated bins
         for i in range(self.Survey.nbin_s):
-            cl_ll[:, i, i] += self.Survey.noise['LL']
+            if type(self.Survey.noise['LL']) == float:
+                cl_ll[:, i, i] += self.Survey.noise['LL']
+            if type(self.Survey.noise['LL']) == np.ndarray:
+                cl_ll[:, i, i] += self.Survey.noise['LL'][i]
+            else:
+                TypeError("Invalid type self.Survey.noise['LL']")
         return cl_ll
-    
 
-    
 
     def get_pmm(self, params_dic):
         """Calculate the matter-matter power spectrum (P_mm) with optional baryonic corrections.
@@ -923,6 +897,7 @@ class Theory:
             pk *= boost_bar
             return pk, boost_bar
         return pk, np.ones((self.Survey.lbin, len(self.Survey.zz_integr)), 'float64')
+
     
     def get_pgg_lin_bias(self, params_dic):
         """Calculate the galaxy-galaxy power spectrum with linear bias (constant in a given redshift bin),
@@ -942,6 +917,7 @@ class Theory:
         # return dimension (lbin, z_integr, bin_i, bin_j)
         pgg = bias1[None, None, :, None] * bias1[None, None, None, :] * self.pmm[:,:,None, None]
         return pgg
+
     
     def get_pgg_quadr_bias(self, params_dic):
         """Calculate the galaxy-galaxy power spectrum with quadratic bias model,
@@ -963,6 +939,7 @@ class Theory:
         pgg = ( bias1[None, None,:, None] + bias2[None, None, :, None] * self.k[:, :, None, None]**2 ) * \
               ( bias1[None, None, None, :] + bias2[None, None, None, :] * self.k[:, :, None, None]**2 ) * self.pmm[:,:,None,None]
         return pgg
+
     
     def get_pgm_lin_bias(self, params_dic):
         """Calculate the galaxy-matter power spectrum with linear bias (constant in a given redshift bin),
@@ -982,6 +959,7 @@ class Theory:
         # return dimension (lbin, z_integr, bin_i)
         pgm = bias1[None, None, :] * self.pmm[:,:,None]
         return pgm
+
     
     def get_pgm_quadr_bias(self, params_dic):
         """Calculate the galaxy-matter power spectrum with quadratic bias,
@@ -1003,7 +981,6 @@ class Theory:
         pgm = ( bias1[None, None,:] + bias2[None, None, :] * self.k[:, :, None]**2 ) * self.pmm[:,:,None]
         return pgm
     
-    
 
     def get_pgg_heft_bias(self, params_dic):
         """Calculate the galaxy-galaxy power spectrum with HEFT Lagrangian bias expansion,
@@ -1023,6 +1000,7 @@ class Theory:
                                                         self.flag_extrap_k_const)
         # return dimension (lbin, z_integr, bin_i, bin_j)
         return pgg
+
     
     def get_pgg_heft_bias_pnl(self, params_dic):
         """Calculate the galaxy-galaxy power spectrum with HEFT Lagrangian bias expansion,
@@ -1042,6 +1020,7 @@ class Theory:
                                                            self.flag_heft_pnl_bar, self.flag_extrap_k_const)
         # return dimension (lbin, z_integr, bin_i, bin_j)
         return pgg
+
     
     def get_pgm_heft_bias(self, params_dic):
         """Calculate the galaxy-matter power spectrum with HEFT Lagrangian bias expansion,
@@ -1061,6 +1040,7 @@ class Theory:
                                                         self.flag_extrap_k_const)
         # return dimension (lbin, z_integr, bin_i)
         return pgm
+
     
     def get_pgm_heft_bias_pnl(self, params_dic):
         """Calculate the galaxy-matter power spectrum with HEFT Lagrangian bias expansion,
@@ -1107,6 +1087,7 @@ class Theory:
         w_g = w_g[None, :, :]
         return w_g
 
+
     def get_cell_galclust(self):
         r"""Compute the galaxy clustering angular power spectrum:
 
@@ -1129,13 +1110,17 @@ class Theory:
         # compute integrand with the dimensions of (ell, z_integr, bin_i, bin_j)
         cl_gg_int = self.w_g[:,:,:,None] *self. w_g[:,: , None, :] * self.pgg / self.ez[None,:,None,None] / self.rz[None,:,None,None] / self.rz[None,:,None,None] / H0_h_c    
         # integrate along the z_integr direction
-        cl_gg = trapezoid(cl_gg_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_gc, :, :] 
+        cl_gg = trapezoid(cl_gg_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_gc, :, :] #simpson(cl_gg_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_gc, :, :] 
         # add noise
         for i in range(self.Survey.nbin_l):
-            cl_gg[:, i, i] += self.Survey.noise['GG']
+            if type(self.Survey.noise['GG']) == float:
+                cl_gg[:, i, i] += self.Survey.noise['GG']
+            if type(self.Survey.noise['GG']) == np.ndarray:
+                cl_gg[:, i, i] += self.Survey.noise['GG'][i]
+            else:
+                TypeError("Invalid type self.Survey.noise['GG']")
         return cl_gg 
     
-
 
     def get_pk_cross_nla(self, params_dic):
         r"""Computes the galaxy-intrinsic alignment power spectrum for the e-zNLA model.
@@ -1185,6 +1170,7 @@ class Theory:
         # then change to bias1[None, None, None, :]*pk_delta_ia[:, :, :, None]
         pk_gal_ia =   bias1[None, None, None, :] * self.pk_delta_ia[:, :, None, None]
         return pk_gal_ia
+
     
     def get_cell_cross(self):
         r"""Compute the galaxy-galaxy lensing or cross-correlation angular power spectrum given by:
@@ -1210,6 +1196,7 @@ class Theory:
         cl_gl : numpy.ndarray
             The galaxy-lensing angular power spectrum with dimensions (ell, bin_i, bin_j).
         """
+        # new implementation
         # compute components of the integrand
         kernel_ia_gal = self.w_ia[:, :, :, None] * self.pk_gal_ia
         kernel_wl_gal = self.w_gamma[:, :, :, None] * self.pgm[:,:,None,:]
@@ -1217,11 +1204,10 @@ class Theory:
         cl_lg_int = (kernel_wl_gal + kernel_ia_gal) * self.w_g[:, :, None, :] / self.ez[None,:,None,None] / self.rz[None,:,None,None] / self.rz[None,:,None,None] / H0_h_c
 
         # integrate along the z-integr direction
-        cl_lg = trapezoid(cl_lg_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_xc,:,:] 
+        cl_lg = trapezoid(cl_lg_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_xc,:,:]  # simpson(cl_lg_int, self.Survey.zz_integr, axis=1)[:self.Survey.nell_xc,:,:] 
         # transpose LG to get GL
         cl_gl = np.transpose(cl_lg, (0, 2, 1))  
         return cl_lg, cl_gl
-    
     
 
     def compute_shear(self, params_dic):
@@ -1292,6 +1278,54 @@ class Theory:
         cl_gg = self.get_cell_galclust()    
         return cl_gg
 
+
+    def compute_ggl(self, params_dic):
+        """
+        Compute the photo-GGL correlation functions. Use this for likelihood computations.
+
+        Parameters:
+        ----------
+        params_dic : dict
+            Dictionary containing cosmological and survey parameters.
+
+        Returns:
+        -------
+        cl_lg, cl_gl : ndarray
+            Photometric galaxy clustering angular power spectra of length Survey.nell_xc.
+        """
+        # compute background
+        self.ez, self.rz, self.k = self.get_ez_rz_k(params_dic)
+        # compute growth factor
+        self.dz, _ = self.StructureEmu.get_growth_binned(params_dic, self.k, self.Survey.lbin, self.Survey.zz_integr) \
+            if self.flag_scale_dependence else self.StructureEmu.get_growth(params_dic, self.Survey.zz_integr)
+        # get redshift uncertainties
+        self.deltaz_s, self.deltaz_l = self.get_deltaz(params_dic)
+        self.pmm, _ = self.get_pmm(params_dic)
+
+        # compute matter-matter power spectrum
+        self.pmm, bar_boost = self.get_pmm(params_dic)
+        self.pmm_no_barboost = self.pmm/bar_boost
+        if self.flag_cross_sqrt_bar_boost:
+            self.pgm = self.get_pgm(params_dic)*np.sqrt(bar_boost[:, :, None])                 
+        else:        
+            self.pgm = self.get_pgm(params_dic)     
+
+        # for heft check that no NaN-values are present due to negative values in b2
+        self.flag_nan = False
+        if np.isnan(self.pgm).any():
+            self.flag_nan = True
+
+        self.w_gamma = self.get_wl_kernel(params_dic)
+        self.w_ia = self.get_ia_kernel(params_dic)
+        self.pk_delta_ia, self.pk_iaia = self.get_pk_ia(params_dic)
+        self.pk_gal_ia = self.get_pk_cross_ia(params_dic)
+        self.w_g = self.get_gg_kernel(params_dic)
+
+        # compute cross-correlated or galaxy-galaxy lensing angular power spectra cl_lg(l, bin_i, bin_j) and cl_gl(l, bin_i, bin_j)
+        cl_lg, cl_gl = self.get_cell_cross()
+        return cl_lg, cl_gl
+
+
     def compute_3x2pt(self, params_dic):
         """
         Compute the 3x2pt correlation functions. Use this when all 3 correlation funcions are required,
@@ -1350,6 +1384,7 @@ class Theory:
         # compute cross-correlated or galaxy-galaxy lensing angular power spectra cl_lg(l, bin_i, bin_j) and cl_gl(l, bin_i, bin_j)
         cl_lg, cl_gl = self.get_cell_cross() 
         return cl_ll, cl_gg, cl_lg, cl_gl  
+    
 
     def get_theory_arrays_3x2pt(self, params_dic):
         """Compute all theory arrays needed for 3x2pt C_ell and likelihood, without
@@ -1415,6 +1450,7 @@ class Theory:
             'H0_h_c': H0_h_c,
         }
 
+
     def get_deltaz(self, params):
         deltaz_s = deltaz_l = None
         if 'deltaz_1' in params:     
@@ -1425,6 +1461,7 @@ class Theory:
         if 'deltaz_l_1' in params:    
             deltaz_l = np.array([params[f'deltaz_l_{i+1}'] for i in range(self.Survey.nbin_l)])  
         return deltaz_s, deltaz_l
+
 
     def compute_data_matrix_3x2pt(self, params_dic):
         r"""This function computes the 3x2pt angular power spectra and composes a matrix 
@@ -1467,6 +1504,7 @@ class Theory:
         # cov_theory (len(all_int_ell_wl), 2 * nbin, 2 * nbin)
         # cov_theory_high (len(all_int_ell_wl) - ell_jump), nbin, nbin)
         return cov_theory, cov_theory_high    
+
 
     def compute_data_vector_3x2pt(self, params_dic):
         """This function calculates the 3x2pt angular power spectra and constructs a data vector
@@ -1543,6 +1581,7 @@ class Theory:
         denom = self.Survey.fsky * (2*self.Survey.ell+1)
         return ( cl2_sum ) / denom
 
+
     def _eval_3x2pt_on_integer_ells(self, params_dic):
         """Compute 3x2pt C_ell at every integer ell in [lmin, lmax].
 
@@ -1562,6 +1601,7 @@ class Theory:
             self._restore_binned_ell(n_ell_binned)
             raise
         return ell_all_int, cl_ll, cl_gg, cl_lg, cl_gl
+
 
     def _restore_binned_ell(self, n_ell):
         self.Survey.ell = self.Survey.l_wl = self.Survey.l_xc = self.Survey.l_gc = self.Survey.l_wl_bin_centers
@@ -1659,6 +1699,31 @@ class Theory:
         self._restore_binned_ell(n_ell)
         return covmat_masked
 
+
+    def mask_input_spaceborne_covariance_3x2pt(self, params_dic):
+        """
+        Reads the Spaceborne-like covariance from input (Gaussian or total)
+        and applies the ell mask. 
+        Returns the 3x2pt masked ovariance.
+        """
+    
+        covs_2d = np.load(self.Survey.cov_input_file)
+
+        if self.Survey.which_cov=='Gauss':
+            covmat = covs_2d['Gauss']
+        elif self.Survey.which_cov=='TOT':
+            covmat = covs_2d['TOT']
+        else:
+            KeyError("Covariance type not valid! Should be 'Gauss' or 'TOT'")
+
+        covmat_masked = covmat[self.Survey.mask_cov_3x2pt]
+
+        # store full and masked covariances
+        self.Survey.covmat_3x2pt_full = covmat
+        self.Survey.covmat_3x2pt_masked = covmat_masked
+
+        return covmat_masked
+    
 
     def compute_covariance_spaceborne_3x2pt(self, params_dic):
         """Gaussian 3x2pt covariance using Spaceborne's equal-weight bin average.
@@ -1760,6 +1825,7 @@ class Theory:
         cov_theory = build_data_matrix(cl_wl, self.Survey.l_wl, self.Survey.ells_wl, self.Survey.nbin_s, self.Survey.nbin_s)
         return cov_theory
     
+    
     def compute_data_vector_wl(self, params_dic):
         """This function calculates the weak lensing angular power spectra and constructs
         the data vector for weak lensing, applying a mask to the resulting data vector.
@@ -1785,6 +1851,7 @@ class Theory:
                 idx_start += 1
         data_vector_masked = data_vector[self.Survey.mask_data_vector_wl]
         return data_vector_masked
+
     
     def compute_covariance_wl(self, params_dic):
         r"""Compute the Gaussian (only diagonal components with :math:`\ell=\ell'`) covariance matrix for the weak lensing (WL) analysis.
@@ -1830,7 +1897,32 @@ class Theory:
         cov_flat_masked = cov_flat[self.Survey.mask_cov_wl]
         print('cov_flat_masked: ', cov_flat_masked.shape)  
         return cov_flat_masked 
+
+
+    def mask_input_spaceborne_covariance_wl(self, params_dic):
+        """
+        Reads the Spaceborne-like covariance from input (Gaussian or total)
+        and applies the ell mask. 
+        Returns the WL masked ovariance.
+        """
     
+        covs_2d = np.load(self.Survey.cov_input_file)
+
+        if self.Survey.which_cov=='Gauss':
+            covmat = covs_2d['Gauss']
+        elif self.Survey.which_cov=='TOT':
+            covmat = covs_2d['TOT']
+        else:
+            KeyError("Covariance type not valid! Should be 'Gauss' or 'TOT'")
+
+        covmat_masked = covmat[self.Survey.mask_cov_wl]
+
+        # store full and masked covariances
+        self.Survey.covmat_wl_full = covmat
+        self.Survey.covmat_wl_masked = covmat_masked
+
+        return covmat_masked
+
 
     def compute_data_matrix_gc(self, params_dic):
         """This function computes the angular power spectra for galaxy clustering
@@ -1853,6 +1945,7 @@ class Theory:
         # construct matrix
         cov_theory = build_data_matrix(cl_gc, self.Survey.l_gc, self.Survey.ells_gc, self.Survey.nbin_l, self.Survey.nbin_l)
         return cov_theory
+    
     
     def compute_data_vector_gc(self, params_dic):
         """This method computes the angular power spectra for galaxy clustering
@@ -1881,6 +1974,7 @@ class Theory:
                 idx_start += 1
         data_vector_masked = data_vector[self.Survey.mask_data_vector_gc]
         return data_vector_masked
+    
     
     def compute_covariance_gc(self, params_dic):
         r"""Compute the Gaussian (only diagonal components with :math:`\ell=\ell'`) covariance matrix for the galaxy clustering (GC) analysis.
@@ -1926,3 +2020,159 @@ class Theory:
         cov_flat_masked = cov_flat[self.Survey.mask_cov_gc]
         print('cov_flat_masked: ', cov_flat_masked.shape)  
         return cov_flat_masked 
+
+
+    def mask_input_spaceborne_covariance_gc(self, params_dic):
+        """
+        Reads the Spaceborne-like covariance from input (Gaussian or total)
+        and applies the ell mask. 
+        Returns the GC masked ovariance.
+        """
+    
+        covs_2d = np.load(self.Survey.cov_input_file)
+
+        if self.Survey.which_cov=='Gauss':
+            covmat = covs_2d['Gauss']
+        elif self.Survey.which_cov=='TOT':
+            covmat = covs_2d['TOT']
+        else:
+            KeyError("Covariance type not valid! Should be 'Gauss' or 'TOT'")
+
+        covmat_masked = covmat[self.Survey.mask_cov_gc]
+
+        # store full and masked covariances
+        self.Survey.covmat_gc_full = covmat
+        self.Survey.covmat_gc_masked = covmat_masked
+
+        return covmat_masked
+
+
+    def compute_data_matrix_xc(self, params_dic):
+        """This function computes the angular power spectra for GGL
+        using the provided parameters dictionary, and then constructs the 
+        data matrix based on the computed power spectra and survey 
+        parameters. This is later used in likelihood with determinants.
+
+        Parameters:
+        ----------
+        params_dic : dict
+            Dictionary containing the parameters required for computing the GGL spectra.
+
+        Returns:
+        -------
+        cov_theory : numpy.ndarray
+            The computed data matrix for the photo-GGL data.
+        """
+        # compute angular power spectra
+        cl_lg, cl_gl = self.compute_ggl(params_dic)
+        # construct matrix
+        cov_theory = build_data_matrix(cl_gl, self.Survey.l_xc, self.Survey.ells_xc, self.Survey.nbin_l, self.Survey.nbin_s)
+        return cov_theory
+
+    
+    def compute_data_vector_xc(self, params_dic):
+        """This method computes the angular power spectra for GGL
+        using the provided parameters dictionary, constructs the data vector,
+        and applies a mask to the data vector.
+
+        Parameters:
+        ----------
+        params_dic : dict
+            Dictionary containing the parameters required for computing the
+            angular power spectra.
+
+        Returns:
+        -------
+        data_vector_masked : numpy.ndarray
+            The masked data vector for GGL.
+        """
+        # compute angular power spectra
+        cl_lg, cl_gl = self.compute_ggl(params_dic)
+        # construct vector
+        data_vector = np.zeros((self.Survey.nell_xc*self.Survey.nbin_s*self.Survey.nbin_l), 'float64')
+        idx_start = 0
+        for bin1 in range(self.Survey.nbin_l):
+            for bin2 in range(self.Survey.nbin_s):
+                data_vector[idx_start*self.Survey.nell_xc:(idx_start+1)*self.Survey.nell_xc] = cl_gl[:, bin1, bin2]
+                idx_start += 1
+        data_vector_masked = data_vector[self.Survey.mask_data_vector_xc]
+        return data_vector_masked
+
+
+    def compute_covariance_xc(self, params_dic):
+        r"""Compute the Gaussian (only diagonal components with :math:`\ell=\ell'`) covariance matrix for the galaxy-galaxy lensing (GGL) analysis.
+        This function calculates the covariance matrix for the cross-correlation of galaxy clustering and weak lensing. 
+        The covariance matrix is computed for different bins and multipoles as follows:
+
+        Parameters:
+        ----------
+        params_dic : dict
+            Dictionary containing the parameters required for the computation of the galaxy-galaxy lensing 
+            angular power spectra.
+        Returns:
+        -------
+        cov_flat_masked : numpy.ndarray
+            The masked covariance matrix for the galaxy-galaxy lensing analysis.
+        """
+        # The Gaussian covariance of C^{GL}_{i j} contains the auto-spectra
+        # C^{GG}_{i k} and C^{LL}_{j l}, as well as the crossed contraction.
+        # These routines include the survey shot and shape noise on their
+        # auto-spectrum diagonals.
+        cl_ll = self.compute_shear(params_dic)
+        cl_gg = self.compute_galclust(params_dic)
+        cl_lg, cl_gl = self.compute_ggl(params_dic)
+
+        denom = ((2*self.Survey.l_xc+1)*self.Survey.fsky*self.Survey.d_ell_bin_cut_xc)
+        cov_flat = np.zeros((self.Survey.nell_xc*self.Survey.nbin_s*self.Survey.nbin_l, self.Survey.nell_xc*self.Survey.nbin_s*self.Survey.nbin_l), 'float64')
+        for bin1 in range(self.Survey.nbin_l):
+            for bin2 in range(self.Survey.nbin_s):
+                for bin3 in range(self.Survey.nbin_l):
+                    for bin4 in range(self.Survey.nbin_s):
+                        row = bin1 * self.Survey.nbin_s + bin2
+                        col = bin3 * self.Survey.nbin_s + bin4
+                        for i in range(self.Survey.nell_xc):
+                            row_idx = self.Survey.nell_xc * row + i
+                            col_idx = self.Survey.nell_xc * col + i
+                            cov_flat[row_idx, col_idx] = (
+                                cl_gg[i, bin1, bin3] * cl_ll[i, bin2, bin4]
+                                + cl_gl[i, bin1, bin4] * cl_lg[i, bin2, bin3]
+                            ) / denom[i]
+        cov_flat_masked = cov_flat[self.Survey.mask_cov_xc]
+        return cov_flat_masked 
+
+
+    def cell_gl_to_gammat(self, params_dic):
+        """
+        Convert galaxy-convergence angular power spectrum
+        into tangential shear.
+
+        Parameters
+        ----------
+        ell : array
+            Angular multipoles.
+        Cl_gk : array
+            Galaxy-convergence angular power spectrum.
+        theta : array
+            Angular separations in radians.
+
+        Returns
+        -------
+        gamma_t : array
+            Predicted tangential shear.
+        """
+        # convert to radians
+        theta_rads = self.Survey.theta *  np.pi / (60 * 180)
+
+        gamma_t = np.zeros((self.Survey.n_theta, self.Survey.nbin_l, self.Survey.nbin_s))
+        _, cl_gl = self.compute_ggl(params_dic)
+
+        for theta_idx in range(self.Survey.n_theta):
+            th = theta_rads[theta_idx]
+            for i in range(self.Survey.nbin_l):
+                for j in range(self.Survey.nbin_s):
+                    integrand = self.Survey.ell * cl_gl[:,i,j] * jv(2, self.Survey.ell * th[i,j])
+
+                    value = trapezoid(integrand, x=self.Survey.ell) / (2*np.pi)
+                    gamma_t[theta_idx, i, j] = value
+
+        return gamma_t
